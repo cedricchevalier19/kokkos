@@ -113,13 +113,51 @@ size_t getDeviceMemorySize() {
 }
 
 struct Arguments {
-  unsigned int numRepetitions       = 10;
-  unsigned int numWarmupRepetitions = 100;
+  unsigned int numRepetitions       = 3;
+  unsigned int numWarmupRepetitions = 5;
   unsigned int numDeviceHostCycles  = 3;
-  double fractionOfDeviceMemory     = 0.4;
+  double fractionOfDeviceMemory     = 0.3;
   double threshold                  = 2.0;
 };
 
+struct SharedSpace {
+    static auto create(size_t length) {
+        return Kokkos::View<int*, Kokkos::SharedSpace> (
+                "sharedMigratableData", length);
+    }
+    static void destroy(Kokkos::View<int*, Kokkos::SharedSpace> view) {
+    }
+    static std::string name() {return "SharedSpace";}
+};
+
+struct HostInitializer {
+    using ExecutionSpace = Kokkos::DefaultHostExecutionSpace;
+    static std::string name() {return "HostMigratableData";}
+};
+
+struct DeviceInitializer {
+    using ExecutionSpace = Kokkos::DefaultExecutionSpace;
+    static std::string name() {return "DeviceMigratableData";}
+};
+
+
+template <typename TagType>
+struct AnonymousSpace {
+        static auto create(size_t length) {
+            auto pointer = new int[length];
+            Kokkos::View<int*, Kokkos::AnonymousSpace> view (
+                    pointer, length);
+            incrementInLoop<typename TagType::ExecutionSpace>(view, 1);
+            return view;
+        }
+        static void destroy(Kokkos::View<int*, Kokkos::AnonymousSpace> view) {
+            delete[] view.data();
+        }
+
+        static auto name() {return TagType::name();}
+};
+
+template <typename SharedType>
 void test_sharedSpace(Arguments args) {
   const unsigned int numRepetitions       = args.numRepetitions;
   const unsigned int numWarmupRepetitions = args.numWarmupRepetitions;
@@ -129,9 +167,7 @@ void test_sharedSpace(Arguments args) {
   size_t numBytes = fractionOfDeviceMemory * getDeviceMemorySize();
   size_t numPages = numBytes / getBytesPerPage();
 
-  // ALLOCATION
-  Kokkos::View<int*, Kokkos::SharedSpace> migratableData(
-      "migratableData", numPages * getBytesPerPage() / sizeof(int));
+  auto migratableData = SharedType::create(numPages * getBytesPerPage() / sizeof(int));
   Kokkos::View<int*, Kokkos::DefaultExecutionSpace::memory_space> deviceData(
       "deviceData", numPages * getBytesPerPage() / sizeof(int));
   Kokkos::View<int*, Kokkos::DefaultHostExecutionSpace::memory_space> hostData(
@@ -211,6 +247,8 @@ void test_sharedSpace(Arguments args) {
       migratesOnEverySpaceAccess = false;
   }
 
+  SharedType::destroy(migratableData);
+
   std::cout << "Page size as reported by os: " << getBytesPerPage()
             << " bytes \n";
   std::cout << "Allocating " << numPages
@@ -232,7 +270,7 @@ void test_sharedSpace(Arguments args) {
             << threshold * hostLocalMean << " for the host and "
             << threshold * deviceLocalMean << " for the device\n\n";
 
-  std::cout << "#############TIMINGS WITH SHAREDSPACE##################\n";
+  std::cout << "#############TIMINGS WITH " << SharedType::name() << " ##################\n";
 
   for (unsigned cycle = 0; cycle < numDeviceHostCycles; ++cycle) {
     std::cout << "device timings of run " << cycle << ":\n";
@@ -250,6 +288,7 @@ void test_sharedSpace(Arguments args) {
 }
 }  // namespace
 
+
 int main(int argc, char* argv[]) {
   static const char help_flag[]                   = "--help";
   static const char numRepetitions_flag[]         = "--numRepetitions=";
@@ -257,14 +296,19 @@ int main(int argc, char* argv[]) {
   static const char numDeviceHostCycles_flag[]    = "--numDeviceHostCycles=";
   static const char fractionOfDeviceMemory_flag[] = "--fractionOfDeviceMemory=";
   static const char threshold_flag[]              = "--threshold=";
+  static const char anonymous_flag[]              = "--anonymous";
 
   int ask_help = 0;
   Arguments args;
+
+  bool anonymous_space = false;
 
   for (int i = 1; i < argc; i++) {
     const char* const a = argv[i];
 
     if (!strncmp(a, help_flag, strlen(help_flag))) ask_help = 1;
+
+    if (!strncmp(a, anonymous_flag, strlen(anonymous_flag))) { anonymous_space = true;}
 
     if (!strncmp(a, numRepetitions_flag, strlen(numRepetitions_flag)))
       args.numRepetitions = std::stoi(a + strlen(numRepetitions_flag));
@@ -294,17 +338,29 @@ int main(int argc, char* argv[]) {
               << " " << numDeviceHostCycles_flag << "##"
               << " " << fractionOfDeviceMemory_flag << "##"
               << " " << threshold_flag << "##"
+              << " " << anonymous_flag << "##"
               << " any given Kokkos args are passed to Kokkos::initialize ##"
               << std::endl;
     return 0;
   }
 
   Kokkos::initialize(argc, argv);
+  std::cout << "Kokkos initialized" << std::endl;
+  std::cout << "Number of Warmup repetitions: " << args.numWarmupRepetitions << std::endl;
+  std::cout << "Number of repetitions: " << args.numRepetitions << std::endl;
+  Kokkos::print_configuration(std::cout);    
+
   if constexpr (Kokkos::has_shared_space)
-    test_sharedSpace(args);
+    test_sharedSpace<SharedSpace>(args);
   else
     std::cout
         << "The used Kokkos configuration does not support SharedSpace \n";
+
+  if (anonymous_space) {
+      test_sharedSpace<AnonymousSpace<HostInitializer>>(args);
+      test_sharedSpace<AnonymousSpace<DeviceInitializer>>(args);
+  }
+
   Kokkos::finalize();
 
   return 0;
