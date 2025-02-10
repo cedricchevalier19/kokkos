@@ -46,7 +46,7 @@ xcompiler_args=""
 cuda_args=""
 
 # Arguments for both NVCC and Host compiler
-shared_args=""
+declare -a shared_args
 
 # Argument -c
 compile_arg=""
@@ -160,24 +160,16 @@ do
             continue
         fi
         echo "nvcc_wrapper - *warning* you have set multiple optimization flags (-O*), only the last is used because nvcc can only accept a single optimization setting."
-        shared_args=${shared_args/ $optimization_flag/}
+        #shared_args+=${shared_args/ $optimization_flag/}
     fi
     if [ "$1" = "-O" ]; then
       optimization_flag="-O2"
     else
       optimization_flag=$1
     fi
-    shared_args="$shared_args $optimization_flag"
+    shared_args+=("$optimization_flag")
     ;;
-  #Handle shared args (valid for both nvcc and the host compiler)
-  -D*)
-    unescape_commas=`echo "$1" | sed -e 's/\\\,/,/g'`
-    arg=`printf "%q" $unescape_commas`
-    shared_args="$shared_args $arg"
-    ;;
-  -I*|-L*|-l*|-g|--help|--version|-E|-M|-shared|-w)
-    shared_args="$shared_args $1"
-    ;;
+
   #Handle compilation argument
   -c)
     compile_arg="$1"
@@ -323,25 +315,25 @@ do
     echo "nvcc_wrapper does not accept standard flags $1 since partial standard flags and standards after C++17 are not supported. nvcc_wrapper will use $fallback_std_flag instead. It is undefined behavior to use this flag. This should only be occurring during CMake configuration."
     if [ -n "$std_flag" ]; then
        warn_std_flag
-       shared_args=${shared_args/ $std_flag/}
+       #shared_args=${shared_args/ $std_flag/}
     fi
     std_flag=$fallback_std_flag
-    shared_args="$shared_args $std_flag"
+    shared_args+=("$std_flag")
     ;;
   -std=gnu*)
     corrected_std_flag=${1/gnu/c}
     echo "nvcc_wrapper has been given GNU extension standard flag $1 - reverting flag to $corrected_std_flag"
     if [ -n "$std_flag" ]; then
        warn_std_flag
-       shared_args=${shared_args/ $std_flag/}
+       #shared_args=${shared_args/ $std_flag/}
     fi
     std_flag=$corrected_std_flag
-    shared_args="$shared_args $std_flag"
+    shared_args+=("$std_flag")
     ;;
   --std=c++20|-std=c++20)
     if [ -n "$std_flag" ]; then
       warn_std_flag
-      shared_args=${shared_args/ $std_flag/}
+      #shared_args=${shared_args/ $std_flag/}
     fi
     # NVCC only has C++20 from version 12 on
     cuda_main_version=$([[ $(${nvcc_compiler} --version) =~ V([0-9]+) ]] && echo ${BASH_REMATCH[1]})
@@ -354,15 +346,15 @@ do
     else
       std_flag=$1
     fi
-    shared_args="$shared_args $std_flag"
+    shared_args+=("$std_flag")
     ;;
   --std=c++11|-std=c++11|--std=c++14|-std=c++14|--std=c++17|-std=c++17)
     if [ -n "$std_flag" ]; then
        warn_std_flag
-       shared_args=${shared_args/ $std_flag/}
+       #shared_args=${shared_args/ $std_flag/}
     fi
     std_flag=$1
-    shared_args="$shared_args $std_flag"
+    shared_args+=("$std_flag")
     ;;
 
   #convert PGI standard flags to something nvcc can handle
@@ -372,7 +364,7 @@ do
        shared_args=${shared_args/ $std_flag/}
     fi
     std_flag="-std=${1#--}"
-    shared_args="$shared_args $std_flag"
+    shared_args+=("$std_flag")
     ;;
 
   #ignore PGI forcing ISO C++-conforming code
@@ -511,6 +503,19 @@ do
     shared_versioned_libraries_host="$shared_versioned_libraries_host $1"
     shared_versioned_libraries="$shared_versioned_libraries -Xlinker $1"
   ;;
+
+  #Handle shared args (valid for both nvcc and the host compiler)
+  # Should be after other non-globing arguments
+  -D*)
+    unescape_commas=`echo "$1" | sed -e 's/\\\,/,/g'`
+    arg=`printf "%q" $unescape_commas`
+    shared_args+=("$arg")
+    ;;
+  -I*|-L*|-l*|-g|--help|--version|-E|-M|-shared|-w)
+    shared_args+=("$1")
+    ;;
+
+
   #All other args are sent to the host compiler
   *)
     if [ $first_xcompiler_arg -eq 1 ]; then
@@ -574,7 +579,7 @@ if [ $arch_set -ne 1 ]; then
 fi
 
 #Compose compilation command
-nvcc_command="$nvcc_compiler $cuda_args $shared_args $xlinker_args $shared_versioned_libraries"
+nvcc_command="$nvcc_compiler $cuda_args $xlinker_args $shared_versioned_libraries"
 if [ $first_xcompiler_arg -eq 0 ]; then
   nvcc_command="$nvcc_command -Xcompiler $xcompiler_args"
 fi
@@ -583,7 +588,7 @@ fi
 xcompiler_args=${xcompiler_args//,/" "}
 
 #Compose host only command
-host_command="$host_compiler $shared_args $host_only_args $compile_arg $output_arg $xcompiler_args $host_linker_args $shared_versioned_libraries_host"
+host_command="$host_compiler ${shared_args[@]} $host_only_args $compile_arg $output_arg $xcompiler_args $host_linker_args $shared_versioned_libraries_host"
 
 #nvcc does not accept '#pragma ident SOME_MACRO_STRING' but it does accept '#ident SOME_MACRO_STRING'
 if [ $replace_pragma_ident -eq 1 ]; then
@@ -646,12 +651,12 @@ elif [ -n "$nvcc_depfile_command" ]; then
   if [ "$NVCC_WRAPPER_SHOW_COMMANDS_BEING_RUN" == "1" ] ; then
     echo "TMPDIR=${temp_dir} $nvcc_command && TMPDIR=${temp_dir} $nvcc_depfile_command"
   fi
-  TMPDIR=${temp_dir} $nvcc_command && TMPDIR=${temp_dir} $nvcc_depfile_command
+  TMPDIR=${temp_dir} $nvcc_command "${shared_args[@]}" && TMPDIR=${temp_dir} $nvcc_depfile_command "${shared_args[@]}"
 else
   if [ "$NVCC_WRAPPER_SHOW_COMMANDS_BEING_RUN" == "1" ] ; then
     echo "TMPDIR=${temp_dir} $nvcc_command"
   fi
-  TMPDIR=${temp_dir} $nvcc_command
+  TMPDIR=${temp_dir} $nvcc_command "${shared_args[@]}"
 fi
 error_code=$?
 
